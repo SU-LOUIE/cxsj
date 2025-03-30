@@ -16,9 +16,9 @@ Original file is located at
 4. Choose Between Base and Instruct Models"""
 
 from unsloth import FastLanguageModel
-max_seq_length = 2048 # Choose any! We auto support RoPE Scaling internally!
-dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
-load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
+max_seq_length = 2048 
+dtype = None 
+load_in_4bit = True 
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name = "./model",
@@ -41,6 +41,7 @@ Please answer the following medical question.
 ### Response:
 <think>{}"""
 
+# Here is an example, and this can make a comparison with the fine-tunned model
 question = "一个患有急性阑尾炎的病人已经发病5天，腹痛稍有减轻但仍然发热，在体检时发现右下腹有压痛的包块，此时应如何处理？"
 
 
@@ -56,9 +57,9 @@ outputs = model.generate(
 response = tokenizer.batch_decode(outputs)
 print(response[0].split("### Response:")[1])
 
-"""## Prepare Dataset
-
+"""
 A medical dataset [https://huggingface.co/datasets/FreedomIntelligence/medical-o1-reasoning-SFT/](https://huggingface.co/datasets/FreedomIntelligence/medical-o1-reasoning-SFT/) will be used to train the selected model.
+And we will add other materials to implement the coverage in medical field 
 """
 
 train_prompt_style = """Below is an instruction that describes a task, paired with an input that provides further context.
@@ -100,30 +101,21 @@ def formatting_prompts_func(examples):
 
 from datasets import load_dataset
 dataset = load_dataset("./data", 'zh', split = "train")
-print(dataset.column_names)
-
-"""For `Ollama` and `llama.cpp` to function like a custom `ChatGPT` Chatbot, we must only have 2 columns - an `instruction` and an `output` column. We need to transform the dataset into proper structure."""
-
 dataset = dataset.map(formatting_prompts_func, batched = True)
-# dataset["text"][0]
 
-"""## Train the model
-Now let's use Huggingface TRL's `SFTTrainer`.
-"""
 
 model = FastLanguageModel.get_peft_model(
     model,
-    r = 64, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128 现在是遗忘问题比较严重，所以增大一下rank，缓解一下
+    r = 64, # bigger rank may have a better effect
     target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                       "gate_proj", "up_proj", "down_proj",],
-    lora_alpha = 16,
-    lora_dropout = 0, # Supports any, but = 0 is optimized
-    bias = "none",    # Supports any, but = "none" is optimized
-    # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-    use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
+    lora_alpha = 128,
+    lora_dropout = 0,
+    bias = "none",    
+    use_gradient_checkpointing = "unsloth", 
     random_state = 3407,
-    use_rslora = False,  # We support rank stabilized LoRA
-    loftq_config = None, # And LoftQ
+    use_rslora = False,  
+    loftq_config = None,
 )
 
 from trl import SFTTrainer
@@ -136,14 +128,14 @@ trainer = SFTTrainer(
     dataset_text_field = "text",
     max_seq_length = max_seq_length,
     dataset_num_proc = 4,
-    packing = False, # Can make training 5x faster for short sequences.
+    packing = False,
     args = TrainingArguments(
         per_device_train_batch_size = 4,
         gradient_accumulation_steps = 8,
         warmup_steps = 10,
-        max_steps = 800,
-        num_train_epochs = 3, # For longer training runs!
-        learning_rate = 1e-4,
+        max_steps = 1200,
+        num_train_epochs = 4,
+        learning_rate = 2e-4,
         fp16 = not is_bfloat16_supported(),
         bf16 = is_bfloat16_supported(),
         logging_steps = 1,
@@ -176,21 +168,4 @@ outputs = model.generate(
 )
 response = tokenizer.batch_decode(outputs)
 print(response[0].split("### Response:")[1])
-
-"""## Upload Model to HuggingFace
-
-Now, let's save our finetuned model and upload it to HuggingFace.
-
-### Save the fine-tuned model to GGUF format
-
-Choose the llama.cpp's GGUF format we prefer by setting the corresponding `if` to `True`.
-"""
-# HUGGINGFACE_TOKEN = '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'
-
-# Save to 8bit Q8_0
-if True: model.save_pretrained_gguf("model", tokenizer)
-
-from huggingface_hub import create_repo
-# create_repo("klbj/medical-model2", token=HUGGINGFACE_TOKEN, exist_ok=True)
-
-# model.push_to_hub_gguf("klbj/medical-model2", tokenizer, token = HUGGINGFACE_TOKEN)
+model.save_pretrained_gguf("./save_model", tokenizer) # save as gguf format, we can use it directly in ollama

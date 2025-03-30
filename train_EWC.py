@@ -9,6 +9,96 @@ from peft import LoraConfig, get_peft_model
 import json
 import random
 
+"""
+Mon Mar 31 00:12:56 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.35.03              Driver Version: 560.35.03      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA TITAN V                 On  |   00000000:04:00.0 Off |                  N/A |
+| 28%   33C    P8             24W /  250W |       1MiB /  12288MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA TITAN V                 On  |   00000000:08:00.0 Off |                  N/A |
+| 28%   34C    P8             24W /  250W |       1MiB /  12288MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+W0331 00:13:02.852000 4094061 site-packages/torch/distributed/run.py:792] 
+W0331 00:13:02.852000 4094061 site-packages/torch/distributed/run.py:792] *****************************************
+W0331 00:13:02.852000 4094061 site-packages/torch/distributed/run.py:792] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0331 00:13:02.852000 4094061 site-packages/torch/distributed/run.py:792] *****************************************
+
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]
+Loading checkpoint shards:  25%|██▌       | 1/4 [00:34<01:43, 34.54s/it]
+Loading checkpoint shards:  25%|██▌       | 1/4 [00:34<01:43, 34.54s/it]
+Loading checkpoint shards:  50%|█████     | 2/4 [01:08<01:08, 34.26s/it]
+Loading checkpoint shards:  50%|█████     | 2/4 [01:08<01:08, 34.26s/it]
+Loading checkpoint shards:  75%|███████▌  | 3/4 [01:41<00:33, 33.57s/it]
+Loading checkpoint shards:  75%|███████▌  | 3/4 [01:41<00:33, 33.57s/it]
+Loading checkpoint shards: 100%|██████████| 4/4 [01:49<00:00, 23.55s/it]
+Loading checkpoint shards: 100%|██████████| 4/4 [01:49<00:00, 27.38s/it]
+
+Loading checkpoint shards: 100%|██████████| 4/4 [01:49<00:00, 23.55s/it]
+Loading checkpoint shards: 100%|██████████| 4/4 [01:49<00:00, 27.38s/it]
+Computing Fisher information matrix...
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/home/weixt_lab/cse12212618/train_EWC.py", line 277, in <module>
+[rank0]:     main()
+[rank0]:   File "/home/weixt_lab/cse12212618/train_EWC.py", line 270, in main
+[rank0]:     med_model.compute_fisher(train_data, num_samples=500)
+[rank0]:   File "/home/weixt_lab/cse12212618/train_EWC.py", line 128, in compute_fisher
+[rank0]:     if p.requires_grad and 'lora' in name.lower()}
+[rank0]:                                      ^^^^
+[rank0]: UnboundLocalError: cannot access local variable 'name' where it is not associated with a value
+[rank0]:[W331 00:16:34.389440787 ProcessGroupNCCL.cpp:1496] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+W0331 00:16:36.845000 4094061 site-packages/torch/distributed/elastic/multiprocessing/api.py:897] Sending process 4096092 closing signal SIGTERM
+E0331 00:16:37.112000 4094061 site-packages/torch/distributed/elastic/multiprocessing/api.py:869] failed (exitcode: 1) local_rank: 0 (pid: 4096091) of binary: /home/weixt_lab/cse12212618/.conda/envs/train/bin/python
+Traceback (most recent call last):
+  File "/home/weixt_lab/cse12212618/.conda/envs/train/bin/torchrun", line 8, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 355, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/run.py", line 918, in main
+    run(args)
+  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/run.py", line 909, in run
+    elastic_launch(
+  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 138, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 269, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+train_EWC.py FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2025-03-31_00:16:36
+  host      : titanvgpu01
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 4096091)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+
+"""
 def setup_distributed():
     dist.init_process_group(backend='nccl')
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
