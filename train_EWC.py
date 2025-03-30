@@ -1,41 +1,17 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling, AutoConfig
+from transformers import BitsAndBytesConfig
 import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset
 from peft import LoraConfig, get_peft_model
 import json
 import random
-
+from torch.nn import DataParallel
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-
-# 现在是这个json读取的格式有一点问题，还需要修改
 """
-The `load_in_4bit` and `load_in_8bit` arguments are deprecated and will be removed in the future versions. Please, pass a `BitsAndBytesConfig` object in `quantization_config` argument instead.
-
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]
-Loading checkpoint shards:  25%|██▌       | 1/4 [00:05<00:16,  5.42s/it]
-Loading checkpoint shards:  50%|█████     | 2/4 [00:10<00:10,  5.48s/it]
-Loading checkpoint shards:  75%|███████▌  | 3/4 [00:16<00:05,  5.58s/it]
-Loading checkpoint shards: 100%|██████████| 4/4 [00:18<00:00,  3.93s/it]
-Loading checkpoint shards: 100%|██████████| 4/4 [00:18<00:00,  4.51s/it]
-Traceback (most recent call last):
-  File "/home/weixt_lab/cse12212618/train_EWC.py", line 220, in <module>
-    dataset = MedicalCoTDataset(data_path, med_model.tokenizer)
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/weixt_lab/cse12212618/train_EWC.py", line 42, in __init__
-    data = json.loads(line)
-           ^^^^^^^^^^^^^^^^
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/json/__init__.py", line 346, in loads
-    return _default_decoder.decode(s)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/json/decoder.py", line 337, in decode
-    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/json/decoder.py", line 355, in raw_decode
-    raise JSONDecodeError("Expecting value", s, err.value) from None
-json.decoder.JSONDecodeError: Expecting value: line 2 column 1 (char 2)
+现在的问题是爆显存了
 """
 
 class MedicalCoTDataset(Dataset):
@@ -65,11 +41,12 @@ class MedicalCoTDataset(Dataset):
         It's crucial to add the EOS (End of Sequence) token at the end of each training dataset entry, otherwise you may encounter infinite generations.
         """
         with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                data = json.loads(line)
-                input = data["Question"]
-                cot = data["Complex_CoT"]
-                outputs = data["Response"]       
+            data = json.load(f)
+            
+            for line in data:
+                input = line["Question"]
+                cot = line["Complex_CoT"]
+                outputs = line["Response"]       
                 input_seq = self.instruction.format(input)
                 target_seq = self.output_ins.format(cot,outputs)
                 text = input_seq + target_seq + self.tokenizer.eos_token
@@ -90,22 +67,29 @@ class MedicalCoTDataset(Dataset):
                 })
     def __len__(self):
         return len(self.samples)
-    def __getitems__(self, keys):
+    def __getitem__(self, keys):
         return self.samples[keys]
 
 class MedicalLoRA_EWC_Model:
     def __init__(self, model_path):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.float16  # 确保跟下面的精度一致
+        )
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
-            device_map="auto",
-            load_in_4bit = True
+            # device_map="auto", # 这里就不用自动分配了
+            quantization_config = quantization_config
         )
+
         self.lora_config = LoraConfig(
-            r = 32, # 在这里增大秩可能可以缓解灾难性遗忘的问题
+            r = 16, # 在这里增大秩可能可以缓解灾难性遗忘的问题，显存不足降低秩可能会有一些帮助
             lora_alpha=32,
             target_modules=["q_proj","v_proj"],  # 在论文里面可以看到这两个对结果的影响最大
             bias='lora_only',
@@ -118,17 +102,20 @@ class MedicalLoRA_EWC_Model:
         self.fisher = {}
         self.optimal_params = {}
         self.ewc_lambda = 1000
+        if torch.cuda.device_count() > 1: 
+            self.model = DataParallel(self.model)
         self.model.to(device)
     
     def compute_fisher(self, dataset, num_samples=500):
         # 计算fisher信息矩阵
         self.model.eval()
         self.fisher = {n: torch.zeros_like(p).to(device) 
-                      for n, p in self.model.named_parameters() 
+                      for n, p in self.model.module.named_parameters() 
                       if p.requires_grad and 'lora' in n}
         
         for _ in range(num_samples):
             sample = random.choice(dataset)
+            # 这里把所有的运算都加载到一张卡上面去，因为出现张量在两张卡上面无法运算的问题
             inputs = {
                 'input_ids': sample['input_ids'].unsqueeze(0).to(device),
                 'attention_mask': sample['attention_mask'].unsqueeze(0).to(device),
@@ -141,7 +128,7 @@ class MedicalLoRA_EWC_Model:
             loss.backward()
             
             # 更新Fisher信息
-            for name, param in self.model.named_parameters():
+            for name, param in self.model.module.named_parameters():
                 if name in self.fisher and param.grad is not None:
                     self.fisher[name] += param.grad.pow(2)
         
@@ -150,26 +137,25 @@ class MedicalLoRA_EWC_Model:
             self.fisher[name] /= num_samples    
 
     def train(self, train_data, eval_data, epochs=3):
-        # 单任务训练（自动应用EWC）, 如果是多训练的话要根据上一次的训练去算fisher矩阵
+        # 单任务训练（自动应用EWC）, 如果是多任务训练的话要根据上一次的训练去算fisher矩阵
         self.optimal_params = {
             n: p.detach().clone().to(device)
-            for n, p in self.model.named_parameters()
+            for n, p in self.model.module.named_parameters()
             if p.requires_grad and 'lora' in n
         }
         
         # 训练参数配置
         training_args = TrainingArguments(
             output_dir="./medical_lora_ewc",
-            per_device_train_batch_size=2,
-            per_device_eval_batch_size=2,
-            gradient_accumulation_steps=4,
+            per_device_train_batch_size=2,  # 会出现显存不足的情况，所以所想batch-size，增大步数来补偿
+            gradient_accumulation_steps=8,
             learning_rate=2e-5,
             num_train_epochs=epochs,
             fp16=True,
-            logging_steps=50,
-            evaluation_strategy="steps",
-            eval_steps=200,
-            save_strategy="no"
+            local_rank=-1,
+            ddp_find_unused_parameters=False,
+            remove_unused_columns=False,
+            gradient_checkpointing=True
         )
         
         trainer = EWC_Trainer(
@@ -195,15 +181,22 @@ class EWC_Trainer(Trainer):
         self.optimal_params = optimal_params
         self.ewc_lambda = ewc_lambda
     
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         # 基础任务损失
+        labels = inputs.pop('lables',None)
         outputs = model(**inputs)
-        task_loss = outputs.loss
+        logits = outputs.logits
+        # 计算任务损失
+        loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+        task_loss = loss_fct(
+            logits.view(-1, logits.size(-1)),
+            labels.view(-1)
+        )
         
         # EWC正则化项
         ewc_loss = 0
         if self.fisher:
-            for name, param in model.named_parameters():
+            for name, param in model.module.named_parameters():
                 if name in self.fisher:
                     ewc_loss += (self.fisher[name] * 
                                 (param - self.optimal_params[name]).pow(2)).sum()

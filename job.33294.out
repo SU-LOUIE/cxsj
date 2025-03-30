@@ -1,29 +1,0 @@
-🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
-🦥 Unsloth Zoo will now patch everything to make training faster!
-==((====))==  Unsloth 2025.3.15: Fast Llama patching. Transformers: 4.49.0.
-   \\   /|    NVIDIA TITAN RTX. Num GPUs = 1. Max memory: 23.463 GB. Platform: Linux.
-O^O/ \_/ \    Torch: 2.6.0+cu124. CUDA: 7.5. CUDA Toolkit: 12.4. Triton: 3.2.0
-\        /    Bfloat16 = FALSE. FA [Xformers = 0.0.29.post3. FA2 = False]
- "-____-"     Free license: http://github.com/unslothai/unsloth
-Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:13<00:39, 13.27s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:27<00:28, 14.00s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:41<00:13, 13.68s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:43<00:00,  9.23s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:43<00:00, 10.87s/it]
-huggingface/tokenizers: The current process just got forked, after parallelism has already been used. Disabling parallelism to avoid deadlocks...
-To disable this warning, you can either:
-	- Avoid using `tokenizers` before the fork if possible
-	- Explicitly set the environment variable TOKENIZERS_PARALLELISM=(true | false)
-huggingface/tokenizers: The current process just got forked, after parallelism has already been used. Disabling parallelism to avoid deadlocks...
-To disable this warning, you can either:
-	- Avoid using `tokenizers` before the fork if possible
-	- Explicitly set the environment variable TOKENIZERS_PARALLELISM=(true | false)
-huggingface/tokenizers: The current process just got forked, after parallelism has already been used. Disabling parallelism to avoid deadlocks...
-To disable this warning, you can either:
-	- Avoid using `tokenizers` before the fork if possible
-	- Explicitly set the environment variable TOKENIZERS_PARALLELISM=(true | false)
-huggingface/tokenizers: The current process just got forked, after parallelism has already been used. Disabling parallelism to avoid deadlocks...
-To disable this warning, you can either:
-	- Avoid using `tokenizers` before the fork if possible
-	- Explicitly set the environment variable TOKENIZERS_PARALLELISM=(true | false)
-huggingface/tokenizers: The current process just got forked, after parallelism has already been used. Disabling parallelism to avoid deadlocks...
-To disable this warning, you can either:
-	- Avoid using `tokenizers` before the fork if possible
-	- Explicitly set the environment variable TOKENIZERS_PARALLELISM=(true | false)
