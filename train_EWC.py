@@ -1,20 +1,22 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling, AutoConfig
-from transformers import BitsAndBytesConfig
+import os
 import torch
-from datasets import load_dataset
-from torch.utils.data import Dataset
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling
+from transformers import BitsAndBytesConfig
+from torch.utils.data import Dataset, DistributedSampler
 from peft import LoraConfig, get_peft_model
 import json
 import random
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-"""
-现在的问题是爆显存了
-"""
+def setup_distributed():
+    dist.init_process_group(backend='nccl')
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    torch.cuda.set_device(local_rank)
+    return local_rank
 
 class MedicalCoTDataset(Dataset):
-    def __init__(self, file_path, tokenizer, max_length = 512):
+    def __init__(self, file_path, tokenizer, max_length=512):
         super().__init__()
         self.tokenizer = tokenizer
         self.samples = []
@@ -35,10 +37,6 @@ class MedicalCoTDataset(Dataset):
         </think>
         {}"""
 
-        """### Important Notice
-
-        It's crucial to add the EOS (End of Sequence) token at the end of each training dataset entry, otherwise you may encounter infinite generations.
-        """
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             
@@ -51,10 +49,10 @@ class MedicalCoTDataset(Dataset):
                 text = input_seq + target_seq + self.tokenizer.eos_token
                 tokenized = self.tokenizer(
                     text,
-                    max_length = max_length,
-                    truncation = True,
-                    padding = 'max_length',
-                    return_tensors = 'pt'
+                    max_length=max_length,
+                    truncation=True,
+                    padding='max_length',
+                    return_tensors='pt'
                 )
                 input_len = len(self.tokenizer(input_seq)['input_ids'])
                 labels = tokenized['input_ids'].clone()[0]
@@ -64,95 +62,146 @@ class MedicalCoTDataset(Dataset):
                     'attention_mask': tokenized['attention_mask'][0],
                     'labels': labels
                 })
+
     def __len__(self):
         return len(self.samples)
-    def __getitem__(self, keys):
-        return self.samples[keys]
+    
+    def __getitem__(self, idx):
+        return self.samples[idx]
 
 class MedicalLoRA_EWC_Model:
-    def __init__(self, model_path):
+    def __init__(self, model_path, local_rank):
+        self.local_rank = local_rank
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.float16  # 确保跟下面的精度一致
+            bnb_4bit_compute_dtype=torch.float16
         )
 
-        self.model = AutoModelForCausalLM.from_pretrained(
+        # 加载基础模型
+        self.base_model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
-            device_map="auto",
-            quantization_config = quantization_config
+            device_map=f"cuda:{local_rank}" if local_rank >= 0 else "auto",
+            quantization_config=quantization_config
         )
 
+        # 配置并应用LoRA
         self.lora_config = LoraConfig(
-            r = 16, # 在这里增大秩可能可以缓解灾难性遗忘的问题，显存不足降低秩可能会有一些帮助
-            lora_alpha=32,
-            target_modules=["q_proj","v_proj"],  # 在论文里面可以看到这两个对结果的影响最大
+            r=8,  # 降低秩以减少显存使用
+            lora_alpha=16,
+            target_modules=["q_proj", "v_proj"],
             bias='lora_only',
             lora_dropout=0.05,
             task_type='CAUSAL_LM'
         )
-        self.model = get_peft_model(self.model,self.lora_config)
+        self.model = get_peft_model(self.base_model, self.lora_config)
+        
+        # 显式启用LoRA参数的梯度
+        for name, param in self.model.named_parameters():
+            if 'lora' in name.lower():
+                param.requires_grad = True
 
-        # 下面是EWC的一些参数
+        # 分布式训练设置
+        if local_rank >= 0:
+            self.model = DDP(
+                self.model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                find_unused_parameters=True  # 处理参数未使用问题
+            )
+
+        # EWC参数
         self.fisher = {}
         self.optimal_params = {}
         self.ewc_lambda = 1000
-        # if torch.cuda.device_count() > 1: 
-        #     self.model = DataParallel(self.model)
-        self.model.to(device)
-    
+
     def compute_fisher(self, dataset, num_samples=500):
-        # 计算fisher信息矩阵
-        self.model.eval()
-        self.fisher = {n: torch.zeros_like(p).to(device) 
-                      for n, p in self.model.named_parameters() 
-                      if p.requires_grad and 'lora' in n}
+        # 确保启用梯度计算
+        self.model.train()
         
-        for _ in range(num_samples):
-            sample = random.choice(dataset)
-            inputs = {
-                'input_ids': sample['input_ids'].unsqueeze(0).to(device),
-                'attention_mask': sample['attention_mask'].unsqueeze(0).to(device),
-                'labels': sample['labels'].unsqueeze(0).to(device)
-            }
+        # 仅收集需要梯度的参数
+        trainable_params = {n: p for n, p in self.model.named_parameters() 
+                          if p.requires_grad and 'lora' in name.lower()}
+        self.fisher = {n: torch.zeros_like(p.data, device=f'cuda:{self.local_rank}') 
+                      for n, p in trainable_params.items()}
+
+        # 分布式数据加载
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=True
+        )
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=1,
+            sampler=sampler,
+            pin_memory=True
+        )
+
+        samples_per_process = max(1, num_samples // dist.get_world_size())
+        
+        for i, sample in enumerate(dataloader):
+            if i >= samples_per_process:
+                break
             
+            # 数据移动到当前设备
+            inputs = {
+                'input_ids': sample['input_ids'].to(f'cuda:{self.local_rank}'),
+                'attention_mask': sample['attention_mask'].to(f'cuda:{self.local_rank}'),
+                'labels': sample['labels'].to(f'cuda:{self.local_rank}')
+            }
+
             self.model.zero_grad()
             outputs = self.model(**inputs)
             loss = outputs.loss
-            loss.backward()
             
-            # 更新Fisher信息
-            for name, param in self.model.named_parameters():
-                if name in self.fisher and param.grad is not None:
-                    self.fisher[name] += param.grad.pow(2)
-        
-        # 归一化
+            # 反向传播计算梯度
+            loss.backward()
+
+            # 收集梯度并更新Fisher矩阵
+            for name, param in trainable_params.items():
+                if param.grad is not None:
+                    # 跨卡梯度聚合
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+                    self.fisher[name] += param.grad.pow(2).to(f'cuda:{self.local_rank}')
+
+        # 全局归一化
         for name in self.fisher:
-            self.fisher[name] /= num_samples    
+            dist.all_reduce(self.fisher[name], op=dist.ReduceOp.SUM)
+            self.fisher[name] /= num_samples
 
     def train(self, train_data, eval_data, epochs=3):
-        # 单任务训练（自动应用EWC）, 如果是多任务训练的话要根据上一次的训练去算fisher矩阵
+        # 保存最优参数
         self.optimal_params = {
-            n: p.detach().clone().to(device)
+            n: p.detach().clone().to(f'cuda:{self.local_rank}')
             for n, p in self.model.named_parameters()
-            if p.requires_grad and 'lora' in n
+            if p.requires_grad and 'lora' in n.lower()
         }
-        
+
         # 训练参数配置
         training_args = TrainingArguments(
             output_dir="./medical_lora_ewc",
-            per_device_train_batch_size=2,  # 会出现显存不足的情况，所以所想batch-size，增大步数来补偿
-            gradient_accumulation_steps=8,
+            per_device_train_batch_size=1,  # 进一步降低batch_size
+            gradient_accumulation_steps=16,
             learning_rate=2e-5,
             num_train_epochs=epochs,
             fp16=True,
-            local_rank=-1,
+            local_rank=self.local_rank,
+            dataloader_num_workers=2,
+            remove_unused_columns=False,
+            ddp_find_unused_parameters=True,
+            logging_steps=50,
+            evaluation_strategy="steps",
+            eval_steps=200,
+            save_strategy="steps",
+            save_steps=500
         )
-        
+
         trainer = EWC_Trainer(
             model=self.model,
             args=training_args,
@@ -176,78 +225,53 @@ class EWC_Trainer(Trainer):
         self.optimal_params = optimal_params
         self.ewc_lambda = ewc_lambda
     
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        # 基础任务损失
-        labels = inputs.pop('lables',None)
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop('labels')
         outputs = model(**inputs)
         logits = outputs.logits
+        
         # 计算任务损失
         loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
         task_loss = loss_fct(
             logits.view(-1, logits.size(-1)),
             labels.view(-1)
         )
-        
-        # EWC正则化项
+
+        # 计算EWC正则项
         ewc_loss = 0
         if self.fisher:
             for name, param in model.named_parameters():
                 if name in self.fisher:
                     ewc_loss += (self.fisher[name] * 
                                 (param - self.optimal_params[name]).pow(2)).sum()
-        
+
         total_loss = task_loss + self.ewc_lambda * ewc_loss
         
         return (total_loss, outputs) if return_outputs else total_loss
 
-def generate_response(model, question, max_length=300):
-    input_seq = f"{model.instruction}\n问题：{question}\n思考："
-    inputs = model.tokenizer(input_seq, return_tensors="pt").to(device)
+def main():
+    local_rank = setup_distributed()
     
-    outputs = model.model.generate(
-        inputs.input_ids,
-        max_length=max_length,
-        temperature=0.7,
-        top_p=0.9,
-        repetition_penalty=1.1,
-        eos_token_id=model.tokenizer.eos_token_id
-    )
-    
-    full_response = model.tokenizer.decode(outputs[0], skip_special_tokens=True)
-    generated_part = full_response[len(input_seq):]
-    
-    if "答案：" in generated_part:
-        reasoning, answer = generated_part.split("答案：", 1)
-        return reasoning.strip(), answer.strip()
-    else:
-        return generated_part, ""  
-          
-if __name__ == "__main__":
     model_path = './model'
     data_path = './data/medical_o1_sft_Chinese.json'
-    # tokenizer = AutoTokenizer.from_pretrained(model_path)
-    # tokenizer.pad_token = tokenizer.eos_token
-
-
-    # EOS_TOKEN = tokenizer.eos_token    
-    med_model = MedicalLoRA_EWC_Model(model_path)
+    
+    med_model = MedicalLoRA_EWC_Model(model_path, local_rank)
     
     dataset = MedicalCoTDataset(data_path, med_model.tokenizer)
     train_size = int(0.9 * len(dataset))
-    train_data, eval_data = torch.utils.data.random_split(dataset, [train_size, len(dataset)-train_size])
-    
-    print("计算Fisher信息矩阵...")
+    train_data, eval_data = torch.utils.data.random_split(
+        dataset, 
+        [train_size, len(dataset)-train_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+
+    if local_rank == 0:
+        print("Computing Fisher information matrix...")
     med_model.compute_fisher(train_data, num_samples=500)
     
-    print("开始微调训练...")
+    if local_rank == 0:
+        print("Starting fine-tuning...")
     med_model.train(train_data, eval_data, epochs=3)
 
-    # test_question = "糖尿病患者应该如何安排饮食？"
-    # reasoning, answer = generate_response(med_model, test_question)
-    
-    # print("\n=== 测试问题 ===")
-    # print(test_question)
-    # print("\n=== 推理过程 ===")
-    # print(reasoning)
-    # print("\n=== 最终答案 ===")
-    # print(answer)    
+if __name__ == "__main__":
+    main()
