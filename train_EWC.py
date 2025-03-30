@@ -6,7 +6,6 @@ from torch.utils.data import Dataset
 from peft import LoraConfig, get_peft_model
 import json
 import random
-from torch.nn import DataParallel
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -84,7 +83,7 @@ class MedicalLoRA_EWC_Model:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
-            # device_map="auto", # 这里就不用自动分配了
+            device_map="auto",
             quantization_config = quantization_config
         )
 
@@ -102,20 +101,19 @@ class MedicalLoRA_EWC_Model:
         self.fisher = {}
         self.optimal_params = {}
         self.ewc_lambda = 1000
-        if torch.cuda.device_count() > 1: 
-            self.model = DataParallel(self.model)
+        # if torch.cuda.device_count() > 1: 
+        #     self.model = DataParallel(self.model)
         self.model.to(device)
     
     def compute_fisher(self, dataset, num_samples=500):
         # 计算fisher信息矩阵
         self.model.eval()
         self.fisher = {n: torch.zeros_like(p).to(device) 
-                      for n, p in self.model.module.named_parameters() 
+                      for n, p in self.model.named_parameters() 
                       if p.requires_grad and 'lora' in n}
         
         for _ in range(num_samples):
             sample = random.choice(dataset)
-            # 这里把所有的运算都加载到一张卡上面去，因为出现张量在两张卡上面无法运算的问题
             inputs = {
                 'input_ids': sample['input_ids'].unsqueeze(0).to(device),
                 'attention_mask': sample['attention_mask'].unsqueeze(0).to(device),
@@ -128,7 +126,7 @@ class MedicalLoRA_EWC_Model:
             loss.backward()
             
             # 更新Fisher信息
-            for name, param in self.model.module.named_parameters():
+            for name, param in self.model.named_parameters():
                 if name in self.fisher and param.grad is not None:
                     self.fisher[name] += param.grad.pow(2)
         
@@ -140,7 +138,7 @@ class MedicalLoRA_EWC_Model:
         # 单任务训练（自动应用EWC）, 如果是多任务训练的话要根据上一次的训练去算fisher矩阵
         self.optimal_params = {
             n: p.detach().clone().to(device)
-            for n, p in self.model.module.named_parameters()
+            for n, p in self.model.named_parameters()
             if p.requires_grad and 'lora' in n
         }
         
@@ -153,9 +151,6 @@ class MedicalLoRA_EWC_Model:
             num_train_epochs=epochs,
             fp16=True,
             local_rank=-1,
-            ddp_find_unused_parameters=False,
-            remove_unused_columns=False,
-            gradient_checkpointing=True
         )
         
         trainer = EWC_Trainer(
@@ -196,7 +191,7 @@ class EWC_Trainer(Trainer):
         # EWC正则化项
         ewc_loss = 0
         if self.fisher:
-            for name, param in model.module.named_parameters():
+            for name, param in model.named_parameters():
                 if name in self.fisher:
                     ewc_loss += (self.fisher[name] * 
                                 (param - self.optimal_params[name]).pow(2)).sum()
