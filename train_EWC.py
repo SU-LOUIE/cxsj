@@ -1,13 +1,14 @@
+import json
 import os
+
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling
-from transformers import BitsAndBytesConfig
-from torch.utils.data import Dataset, DistributedSampler
 from peft import LoraConfig, get_peft_model
-import json
-import random
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Dataset, DistributedSampler
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, \
+    DataCollatorForLanguageModeling
+from transformers import BitsAndBytesConfig
 
 """
 Mon Mar 31 00:12:56 2025       
@@ -215,7 +216,7 @@ class MedicalLoRA_EWC_Model:
         
         # 仅收集需要梯度的参数
         trainable_params = {n: p for n, p in self.model.named_parameters() 
-                          if p.requires_grad and 'lora' in name.lower()}
+                          if p.requires_grad and 'lora' in n.lower()}
         self.fisher = {n: torch.zeros_like(p.data, device=f'cuda:{self.local_rank}') 
                       for n, p in trainable_params.items()}
 
@@ -315,7 +316,7 @@ class EWC_Trainer(Trainer):
         self.optimal_params = optimal_params
         self.ewc_lambda = ewc_lambda
     
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop('labels')
         outputs = model(**inputs)
         logits = outputs.logits
