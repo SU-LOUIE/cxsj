@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingA
 from transformers import BitsAndBytesConfig
 
 """
-这一版虽然成功训练完了，但是模型的参数不知道保存到哪里去了
+Use 8bit quantization and save locally. Next, evaluate the model, then modify the parameters and dataset accordingly.
 """
 def setup_distributed():
     dist.init_process_group(backend='nccl')
@@ -78,12 +78,6 @@ class MedicalLoRA_EWC_Model:
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # quantization_config = BitsAndBytesConfig(
-        #     load_in_4bit=True,
-        #     bnb_4bit_use_double_quant=True,
-        #     bnb_4bit_compute_dtype=torch.float16
-        # )
-        # 选择8bit量化以提高性能，虽然会多占用显存
         quantization_config = BitsAndBytesConfig(
             load_in_8bit=True,  
             bnb_8bit_use_double_quant=True,  
@@ -96,7 +90,7 @@ class MedicalLoRA_EWC_Model:
             quantization_config=quantization_config
         )
 
-        # 配置并应用LoRA
+        # config and apply LoRA
         self.lora_config = LoraConfig(
             r=8,  # 降低秩以减少显存使用
             lora_alpha=16,
@@ -107,12 +101,12 @@ class MedicalLoRA_EWC_Model:
         )
         self.model = get_peft_model(self.base_model, self.lora_config)
         
-        # 显式启用LoRA参数的梯度
+        # explicitly set requires_grad to True for LoRA parameters
         for name, param in self.model.named_parameters():
             if 'lora' in name.lower():
                 param.requires_grad = True
 
-        # 分布式训练设置
+        # Distributed training setup
         if local_rank >= 0:
             self.model = DDP(
                 self.model,
@@ -127,16 +121,16 @@ class MedicalLoRA_EWC_Model:
         self.ewc_lambda = 1000
 
     def compute_fisher(self, dataset, num_samples=500):
-        # 确保启用梯度计算
         self.model.train()
         
-        # 仅收集需要梯度的参数
+        # Since LoRA fine-tuning is applied, compute the Fisher matrix only for LoRA parameters.
+        # Note: The Fisher matrix is computed based on the sum of squares of the parameters' gradients.
         trainable_params = {n: p for n, p in self.model.named_parameters() 
                           if p.requires_grad and 'lora' in n.lower()}
         self.fisher = {n: torch.zeros_like(p.data, device=f'cuda:{self.local_rank}') 
                       for n, p in trainable_params.items()}
 
-        # 分布式数据加载
+        # Distributed data loading
         sampler = DistributedSampler(
             dataset,
             num_replicas=dist.get_world_size(),
@@ -156,7 +150,7 @@ class MedicalLoRA_EWC_Model:
             if i >= samples_per_process:
                 break
             
-            # 数据移动到当前设备
+            # Move data to the current device
             inputs = {
                 'input_ids': sample['input_ids'].to(f'cuda:{self.local_rank}'),
                 'attention_mask': sample['attention_mask'].to(f'cuda:{self.local_rank}'),
@@ -164,35 +158,34 @@ class MedicalLoRA_EWC_Model:
             }
 
             self.model.zero_grad()
-            outputs = self.model(**inputs)
+            outputs = self.model(**inputs)  # unpack the dic, pass the keyword and arg to the model
             loss = outputs.loss
             loss.backward()
 
-            # 收集梯度并更新Fisher矩阵
+            # collect gradients and updata the Fisher matrix
             for name, param in trainable_params.items():
                 if param.grad is not None:
                     dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
                     self.fisher[name] += param.grad.pow(2).to(f'cuda:{self.local_rank}')
 
-        # 全局归一化
+        # normalization
         for name in self.fisher:
-            dist.all_reduce(self.fisher[name], op=dist.ReduceOp.SUM)  # 用这个来聚集所有进程中的梯度
+            dist.all_reduce(self.fisher[name], op=dist.ReduceOp.SUM)  # Gathering gradients from all processes
             self.fisher[name] /= num_samples
 
     def train(self, train_data, eval_data, epochs=3):
-        # 保存最优参数
+        # Sava optiaml params
         self.optimal_params = {
             n: p.detach().clone().to(f'cuda:{self.local_rank}')
             for n, p in self.model.named_parameters()
             if p.requires_grad and 'lora' in n.lower()
         }
 
-        # 训练参数配置
         training_args = TrainingArguments(
             output_dir="./medical_lora_ewc",
-            per_device_train_batch_size=1,  # 进一步降低batch_size
+            per_device_train_batch_size=1,  # 2 may casuse out of memory
             gradient_accumulation_steps=8,
-            learning_rate=2e-5,
+            learning_rate=5e-5,
             num_train_epochs=epochs,
             fp16=True,
             local_rank=self.local_rank,
@@ -203,7 +196,7 @@ class MedicalLoRA_EWC_Model:
             evaluation_strategy="steps",
             eval_steps=200,
             save_strategy="steps",
-            save_steps=1000  # 这里是每五百步就保存一次，可以选择性地保存
+            save_steps=1000  # save checkpoint every 1000 steps
         )
 
         trainer = EWC_Trainer(
@@ -222,8 +215,7 @@ class MedicalLoRA_EWC_Model:
         
         trainer.train()
 
-        # 保存模型和tokenizer
-        if self.local_rank == 0:
+        if self.local_rank == 0: # save model only on the main process
             self.base_model.save_pretrained("./medical_lora_ewc")
             self.tokenizer.save_pretrained("./medical_lora_ewc")
             print("Model and tokenizer saved to ./medical_lora_ewc")
@@ -240,14 +232,14 @@ class EWC_Trainer(Trainer):
         outputs = model(**inputs)
         logits = outputs.logits
         
-        # 计算任务损失
+        # compute loss
         loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
         task_loss = loss_fct(
             logits.view(-1, logits.size(-1)),
             labels.view(-1)
-        )
+        )  # Flatten the logits
 
-        # 计算EWC正则项
+        # compute EWC regularization loss
         ewc_loss = 0
         if self.fisher:
             for name, param in model.named_parameters():
@@ -283,7 +275,7 @@ def main():
         print("Starting fine-tuning...")
     med_model.train(train_data, eval_data, epochs=3)
 
-    dist.destroy_process_group()  # 进程结束之后要显示调用这个来释放资源，不然会有警告
+    dist.destroy_process_group()  # Explicitly destroy the process group
 
 if __name__ == "__main__":
     main()
