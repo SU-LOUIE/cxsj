@@ -6,99 +6,11 @@ import torch.distributed as dist
 from peft import LoraConfig, get_peft_model
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DistributedSampler
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, \
-    DataCollatorForLanguageModeling
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from transformers import BitsAndBytesConfig
 
 """
-Mon Mar 31 00:12:56 2025       
-+-----------------------------------------------------------------------------------------+
-| NVIDIA-SMI 560.35.03              Driver Version: 560.35.03      CUDA Version: 12.6     |
-|-----------------------------------------+------------------------+----------------------+
-| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
-|                                         |                        |               MIG M. |
-|=========================================+========================+======================|
-|   0  NVIDIA TITAN V                 On  |   00000000:04:00.0 Off |                  N/A |
-| 28%   33C    P8             24W /  250W |       1MiB /  12288MiB |      0%      Default |
-|                                         |                        |                  N/A |
-+-----------------------------------------+------------------------+----------------------+
-|   1  NVIDIA TITAN V                 On  |   00000000:08:00.0 Off |                  N/A |
-| 28%   34C    P8             24W /  250W |       1MiB /  12288MiB |      0%      Default |
-|                                         |                        |                  N/A |
-+-----------------------------------------+------------------------+----------------------+
-                                                                                         
-+-----------------------------------------------------------------------------------------+
-| Processes:                                                                              |
-|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
-|        ID   ID                                                               Usage      |
-|=========================================================================================|
-|  No running processes found                                                             |
-+-----------------------------------------------------------------------------------------+
-W0331 00:13:02.852000 4094061 site-packages/torch/distributed/run.py:792] 
-W0331 00:13:02.852000 4094061 site-packages/torch/distributed/run.py:792] *****************************************
-W0331 00:13:02.852000 4094061 site-packages/torch/distributed/run.py:792] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
-W0331 00:13:02.852000 4094061 site-packages/torch/distributed/run.py:792] *****************************************
-
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]
-Loading checkpoint shards:  25%|██▌       | 1/4 [00:34<01:43, 34.54s/it]
-Loading checkpoint shards:  25%|██▌       | 1/4 [00:34<01:43, 34.54s/it]
-Loading checkpoint shards:  50%|█████     | 2/4 [01:08<01:08, 34.26s/it]
-Loading checkpoint shards:  50%|█████     | 2/4 [01:08<01:08, 34.26s/it]
-Loading checkpoint shards:  75%|███████▌  | 3/4 [01:41<00:33, 33.57s/it]
-Loading checkpoint shards:  75%|███████▌  | 3/4 [01:41<00:33, 33.57s/it]
-Loading checkpoint shards: 100%|██████████| 4/4 [01:49<00:00, 23.55s/it]
-Loading checkpoint shards: 100%|██████████| 4/4 [01:49<00:00, 27.38s/it]
-
-Loading checkpoint shards: 100%|██████████| 4/4 [01:49<00:00, 23.55s/it]
-Loading checkpoint shards: 100%|██████████| 4/4 [01:49<00:00, 27.38s/it]
-Computing Fisher information matrix...
-[rank0]: Traceback (most recent call last):
-[rank0]:   File "/home/weixt_lab/cse12212618/train_EWC.py", line 277, in <module>
-[rank0]:     main()
-[rank0]:   File "/home/weixt_lab/cse12212618/train_EWC.py", line 270, in main
-[rank0]:     med_model.compute_fisher(train_data, num_samples=500)
-[rank0]:   File "/home/weixt_lab/cse12212618/train_EWC.py", line 128, in compute_fisher
-[rank0]:     if p.requires_grad and 'lora' in name.lower()}
-[rank0]:                                      ^^^^
-[rank0]: UnboundLocalError: cannot access local variable 'name' where it is not associated with a value
-[rank0]:[W331 00:16:34.389440787 ProcessGroupNCCL.cpp:1496] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
-W0331 00:16:36.845000 4094061 site-packages/torch/distributed/elastic/multiprocessing/api.py:897] Sending process 4096092 closing signal SIGTERM
-E0331 00:16:37.112000 4094061 site-packages/torch/distributed/elastic/multiprocessing/api.py:869] failed (exitcode: 1) local_rank: 0 (pid: 4096091) of binary: /home/weixt_lab/cse12212618/.conda/envs/train/bin/python
-Traceback (most recent call last):
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/bin/torchrun", line 8, in <module>
-    sys.exit(main())
-             ^^^^^^
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 355, in wrapper
-    return f(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/run.py", line 918, in main
-    run(args)
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/run.py", line 909, in run
-    elastic_launch(
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 138, in __call__
-    return launch_agent(self._config, self._entrypoint, list(args))
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/weixt_lab/cse12212618/.conda/envs/train/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 269, in launch_agent
-    raise ChildFailedError(
-torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
-============================================================
-train_EWC.py FAILED
-------------------------------------------------------------
-Failures:
-  <NO_OTHER_FAILURES>
-------------------------------------------------------------
-Root Cause (first observed failure):
-[0]:
-  time      : 2025-03-31_00:16:36
-  host      : titanvgpu01
-  rank      : 0 (local_rank: 0)
-  exitcode  : 1 (pid: 4096091)
-  error_file: <N/A>
-  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
-============================================================
-
+这一版虽然成功训练完了，但是模型的参数不知道保存到哪里去了
 """
 def setup_distributed():
     dist.init_process_group(backend='nccl')
@@ -166,13 +78,17 @@ class MedicalLoRA_EWC_Model:
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
+        # quantization_config = BitsAndBytesConfig(
+        #     load_in_4bit=True,
+        #     bnb_4bit_use_double_quant=True,
+        #     bnb_4bit_compute_dtype=torch.float16
+        # )
+        # 选择8bit量化以提高性能，虽然会多占用显存
         quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.float16
+            load_in_8bit=True,  
+            bnb_8bit_use_double_quant=True,  
+            bnb_8bit_compute_dtype=torch.float16  
         )
-
-        # 加载基础模型
         self.base_model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
@@ -250,20 +166,17 @@ class MedicalLoRA_EWC_Model:
             self.model.zero_grad()
             outputs = self.model(**inputs)
             loss = outputs.loss
-            
-            # 反向传播计算梯度
             loss.backward()
 
             # 收集梯度并更新Fisher矩阵
             for name, param in trainable_params.items():
                 if param.grad is not None:
-                    # 跨卡梯度聚合
                     dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
                     self.fisher[name] += param.grad.pow(2).to(f'cuda:{self.local_rank}')
 
         # 全局归一化
         for name in self.fisher:
-            dist.all_reduce(self.fisher[name], op=dist.ReduceOp.SUM)
+            dist.all_reduce(self.fisher[name], op=dist.ReduceOp.SUM)  # 用这个来聚集所有进程中的梯度
             self.fisher[name] /= num_samples
 
     def train(self, train_data, eval_data, epochs=3):
@@ -278,7 +191,7 @@ class MedicalLoRA_EWC_Model:
         training_args = TrainingArguments(
             output_dir="./medical_lora_ewc",
             per_device_train_batch_size=1,  # 进一步降低batch_size
-            gradient_accumulation_steps=16,
+            gradient_accumulation_steps=8,
             learning_rate=2e-5,
             num_train_epochs=epochs,
             fp16=True,
@@ -290,7 +203,7 @@ class MedicalLoRA_EWC_Model:
             evaluation_strategy="steps",
             eval_steps=200,
             save_strategy="steps",
-            save_steps=500
+            save_steps=1000  # 这里是每五百步就保存一次，可以选择性地保存
         )
 
         trainer = EWC_Trainer(
@@ -308,6 +221,12 @@ class MedicalLoRA_EWC_Model:
         )
         
         trainer.train()
+
+        # 保存模型和tokenizer
+        if self.local_rank == 0:
+            self.base_model.save_pretrained("./medical_lora_ewc")
+            self.tokenizer.save_pretrained("./medical_lora_ewc")
+            print("Model and tokenizer saved to ./medical_lora_ewc")
 
 class EWC_Trainer(Trainer):
     def __init__(self, fisher_matrix, optimal_params, ewc_lambda, **kwargs):
@@ -363,6 +282,8 @@ def main():
     if local_rank == 0:
         print("Starting fine-tuning...")
     med_model.train(train_data, eval_data, epochs=3)
+
+    dist.destroy_process_group()  # 进程结束之后要显示调用这个来释放资源，不然会有警告
 
 if __name__ == "__main__":
     main()
