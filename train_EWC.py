@@ -92,7 +92,7 @@ class MedicalLoRA_EWC_Model:
 
         # config and apply LoRA
         self.lora_config = LoraConfig(
-            r=8,  # 降低秩以减少显存使用
+            r=8,  
             lora_alpha=16,
             target_modules=["q_proj", "v_proj"],
             bias='lora_only',
@@ -112,10 +112,10 @@ class MedicalLoRA_EWC_Model:
                 self.model,
                 device_ids=[local_rank],
                 output_device=local_rank,
-                find_unused_parameters=True  # 处理参数未使用问题
+                find_unused_parameters=True  # handle unused parameters in DDP
             )
 
-        # EWC参数
+        # EWC parameters
         self.fisher = {}
         self.optimal_params = {}
         self.ewc_lambda = 1000
